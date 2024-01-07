@@ -168,3 +168,12 @@ jobs:
           version='${{ needs.init.outputs.version }}'
           podman run --rm "ghcr.io/${{ github.repository }}/amd64:$version" bash -c 'apt-get update && apt-get install -y vim'
           podman run --rm "ghcr.io/${{ github.repository }}/arm64:$version" bash -c 'apt-get update && apt-get install -y vim'
+  re-run:
+    needs: [ mirror, publish ]
+    if: failure() && fromJSON(github.run_attempt) < 3
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run rerun.yml -F run_id=${{ github.run_id }}
