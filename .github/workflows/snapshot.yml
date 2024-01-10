@@ -1,6 +1,11 @@
 name: snapshot
 on:
+  push:
   workflow_dispatch:
+    inputs:
+      dev:
+        type: boolean
+        default: true
   schedule:
     - cron: '0 0 * * *'
 jobs:
@@ -32,11 +37,15 @@ jobs:
       - name: resolve GL version
         id: version
         run: |
-          gl_start=2020-03-31
-          currentdate="$(date -u '+%Y-%m-%d')"
-          datediff=$(( "$(date -u -d "$currentdate" '+%s')" - "$(date -u -d "$gl_start" '+%s')" ))
-          days_since_start=$(( datediff / 86400 ))
-          echo "version=$days_since_start" > "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" == push ] || [ "${{ github.inputs.dev }}" == true ]; then
+            echo "version=dev" >> "$GITHUB_OUTPUT"
+          else
+            gl_start=2020-03-31
+            currentdate="$(date -u '+%Y-%m-%d')"
+            datediff=$(( "$(date -u -d "$currentdate" '+%s')" - "$(date -u -d "$gl_start" '+%s')" ))
+            days_since_start=$(( datediff / 86400 ))
+            echo "version=$days_since_start" >> "$GITHUB_OUTPUT"
+          fi
       - name: mirror debian testing meta data
         run: |
           podman build -t mirror_apt_repo .
@@ -132,7 +141,7 @@ jobs:
           set -eufo pipefail
           gzip -d < repo.tar.gz | tar -x
           version='${{ needs.init.outputs.version }}'
-          if aws s3api head-object --bucket '${{ vars.S3_BUCKET }}' --key "dists/$version/InRelease"; then
+          if [ "$version" != dev ] && aws s3api head-object --bucket '${{ vars.S3_BUCKET }}' --key "dists/$version/InRelease"; then
             echo "release $version already exists" >&2
             exit 1
           fi
