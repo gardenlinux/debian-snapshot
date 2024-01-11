@@ -43,9 +43,8 @@ download_from_release() (
 
 main() (
 	target_dir=
-	input_repo=deb.debian.org/debian
-	input_dist=testing
-	output_dist=
+	repo=deb.debian.org/debian
+	dist=testing
 
 	while [ $# -gt 0 ]; do
 		case "$1" in
@@ -57,12 +56,8 @@ main() (
 				repo="$2"
 				shift 2
 				;;
-			-i|--input-dist)
-				input_dist="$2"
-				shift 2
-				;;
-			-o|--output-dist)
-				output_dist="$2"
+			-d|--dist)
+				dist="$2"
 				shift 2
 				;;
 			*)
@@ -72,22 +67,21 @@ main() (
 	done
 
 	[ -n "$target_dir" ]
-	[ -n "$input_repo" ]
-	[ -n "$input_dist" ]
-	[ -n "$output_dist" ]
+	[ -n "$repo" ]
+	[ -n "$dist" ]
 
-	t="$(date -u -Is)"
+	release="$(download_gpg "http://$repo/dists/$dist/InRelease")"
+	date="$(awk -F ': ' '$1 == "Date" { print $2 }' < "$release")"
+	timestamp="$(date -d "$date" '+%s')"
 
-	release="$(download_gpg "http://$input_repo/dists/$input_dist/InRelease")"
 	index_files="$(mktemp)"
-
 	mkdir -p "$target_dir"
 	truncate -s 0 "$target_dir/mirrorlist"
 	for path in main/binary-{all,amd64,arm64}/Packages main/source/Sources; do
 		mkdir -p "$target_dir/$(dirname "$path")"
-		file="$(download_from_release "$input_repo" "$input_dist" "$path.gz" < "$release")"
+		file="$(download_from_release "$repo" "$dist" "$path.gz" < "$release")"
 		mirrorlist="$(mktemp)"
-		gzip -d < "$file" | parse_pkgs "source_file_prefix=http://$input_repo/" "mirrorlist=$mirrorlist" > "$target_dir/$path"
+		gzip -d < "$file" | parse_pkgs "source_file_prefix=http://$repo/" "mirrorlist=$mirrorlist" > "$target_dir/$path"
 		rm "$file"
 		cat "$mirrorlist" >> "$target_dir/mirrorlist"
 		rm "$mirrorlist"
@@ -104,11 +98,11 @@ main() (
 	rm "$release"
 
 	cat <<-EOF | gpg --clearsign > "$target_dir/InRelease"
-	Codename: $output_dist
+	Codename: $dist$timestamp
 	Components: main
 	Architectures: all amd64 arm64
-	Date: $(date -R -u -d "$t")
-	Valid-Until: $(date -R -u -d "$t + 100 years")
+	Date: $(date -R -u -d "$date")
+	Valid-Until: $(date -R -u -d "$date + 100 years")
 	SHA256:
 	$(cat "$index_files")
 	EOF

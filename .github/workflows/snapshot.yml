@@ -1,17 +1,14 @@
 name: snapshot
 on:
   push:
+    branch: main
   workflow_dispatch:
-    inputs:
-      dev:
-        type: boolean
-        default: true
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 * * * *'
 jobs:
   init:
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      skip: ${{ steps.skip.outputs.skip }}
       mirror_matrix: ${{ steps.setup_matrix.outputs.matrix }}
     runs-on: ubuntu-latest
     permissions:
@@ -34,34 +31,36 @@ jobs:
           echo "fifo=$fifo" >> "$GITHUB_OUTPUT"
           aws s3api list-objects --bucket '${{ vars.S3_BUCKET }}' | jq -r '.Contents // [] | .[].Key' | grep -v ' ' | sort > "$fifo" &
           disown
-      - name: resolve GL version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" == push ] || [ "${{ github.inputs.dev }}" == true ]; then
-            echo "version=dev" >> "$GITHUB_OUTPUT"
-          else
-            gl_start=2020-03-31
-            currentdate="$(date -u '+%Y-%m-%d')"
-            datediff=$(( "$(date -u -d "$currentdate" '+%s')" - "$(date -u -d "$gl_start" '+%s')" ))
-            days_since_start=$(( datediff / 86400 ))
-            echo "version=$days_since_start" >> "$GITHUB_OUTPUT"
-          fi
       - name: mirror debian testing meta data
         run: |
+          set -x
           podman build -t mirror_apt_repo .
           mkdir repo
           podman run --rm -e 'AWS_*' \
             -e 'KMS_KEY_ID=${{ secrets.KMS_KEY_ID }}' \
             -e 'KMS_KEY_CERT=${{ secrets.KMS_KEY_CERT }}' \
             -e 'KMS_KEY_GPG=${{ secrets.KMS_KEY_GPG }}' \
-            -v "$PWD/repo:/mnt/repo" \
-            mirror_apt_repo -o '${{ steps.version.outputs.version }}' -t /mnt/repo
-          tar -c repo | gzip > repo.tar.gz
-      - uses: actions/upload-artifact@v4
+            -v "$PWD/repo:/repo" \
+            mirror_apt_repo
+      - id: skip
+        name: check if version already mirrored
+        run: |
+          set -eufo pipefail
+          dist="$(awk -F ': ' '$1 == "Codename" { print $2 }' < repo/InRelease)"
+          if aws s3api head-object --bucket '${{ vars.S3_BUCKET }}' --key "dists/$dist/InRelease" > /dev/null 2>&1; then
+            echo "dist $dist already exists" >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: ${{ steps.skip.outputs.skip != 'true' }}
+        name: pack repo
+        run: tar -c repo | gzip > repo.tar.gz
+      - if: ${{ steps.skip.outputs.skip != 'true' }}
+        uses: actions/upload-artifact@v4
         with:
           name: repo
           path: repo.tar.gz
-      - name: setup mirror matrix
+      - if: ${{ steps.skip.outputs.skip != 'true' }}
+        name: setup mirror matrix
         id: setup_matrix
         run: |
           set -eufo pipefail
@@ -74,14 +73,16 @@ jobs:
           fi
           if [ "$num_jobs" -gt "$MAX_MIRROR_JOBS" ]; then num_jobs="$MAX_MIRROR_JOBS"; fi
           echo "matrix=$(jq -n -c '{"id":[ range('"$num_jobs"') ]}')" >> "$GITHUB_OUTPUT"
-      - run: gzip < mirrorlist > mirrorlist.gz
-      - uses: actions/upload-artifact@v4
+      - if: ${{ steps.skip.outputs.skip != 'true' }}
+        run: gzip < mirrorlist > mirrorlist.gz
+      - if: ${{ steps.skip.outputs.skip != 'true' }}
+        uses: actions/upload-artifact@v4
         with:
           name: mirrorlist
           path: mirrorlist.gz
   mirror:
     needs: init
-    if: ${{ needs.init.outputs.mirror_matrix != '' }}
+    if: ${{ needs.init.outputs.skip != 'true' && needs.init.outputs.mirror_matrix != '' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -122,8 +123,10 @@ jobs:
             echo "[$cntr/$num_files] $target"
           done
   publish:
+    outputs:
+      dist: ${{ steps.publish.outputs.dist }}
     needs: [ init, mirror ]
-    if: ${{ always() && needs.init.result == 'success' && (needs.mirror.result == 'success' || needs.mirror.result == 'skipped') }}
+    if: ${{ always() && needs.init.result == 'success' && (needs.mirror.result == 'success' || needs.mirror.result == 'skipped') && needs.init.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -136,19 +139,21 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: repo
-      - name: publish ${{ needs.init.outputs.version }} to S3
+      - id: publish
+        name: publish to S3
         run: |
           set -eufo pipefail
           gzip -d < repo.tar.gz | tar -x
-          version='${{ needs.init.outputs.version }}'
-          if [ "$version" != dev ] && aws s3api head-object --bucket '${{ vars.S3_BUCKET }}' --key "dists/$version/InRelease"; then
-            echo "release $version already exists" >&2
+          dist="$(awk -F ': ' '$1 == "Codename" { print $2 }' < repo/InRelease)"
+          echo "dist=$dist" >> "$GITHUB_OUTPUT"
+          if aws s3api head-object --bucket '${{ vars.S3_BUCKET }}' --key "dists/$dist/InRelease" > /dev/null 2>&1; then
+            echo "dist $dist already exists" >&2
             exit 1
           fi
-          aws s3 cp --recursive repo "s3://${{ vars.S3_BUCKET }}/dists/$version"
+          aws s3 cp --recursive repo "s3://${{ vars.S3_BUCKET }}/dists/$dist"
   containerize:
     name: bootstrap dev container
-    needs: [ init, publish ]
+    needs: publish
     if: ${{ always() && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
@@ -157,26 +162,32 @@ jobs:
         run: sudo podman run --privileged ghcr.io/gardenlinux/binfmt_container >/dev/null 2>&1
       - name: build
         run: |
-          version='${{ needs.init.outputs.version }}'
-          echo "$version" > bootstrap_container/version
+          dist='${{ needs.publish.outputs.dist }}'
+          echo "$dist" > bootstrap_container/version
           echo 'https://${{ vars.S3_BUCKET }}.s3.eu-central-1.amazonaws.com' > bootstrap_container/repo
           cd bootstrap_container
           ./build container-amd64 container-arm64
-      - name: publish
+      - name: load
         run: |
-          version='${{ needs.init.outputs.version }}'
-          podman login -u token -p ${{ github.token }} ghcr.io
+          dist='${{ needs.publish.outputs.dist }}'
           image_amd64="$(podman load < bootstrap_container/.build/container-amd64-*.oci | awk '{ print $NF }')"
-          podman tag "$image_amd64" "ghcr.io/${{ github.repository }}/amd64:$version"
-          podman push "ghcr.io/${{ github.repository }}/amd64:$version"
+          podman tag "$image_amd64" "ghcr.io/${{ github.repository }}/amd64"
+          podman tag "$image_amd64" "ghcr.io/${{ github.repository }}/amd64:$dist"
           image_arm64="$(podman load < bootstrap_container/.build/container-arm64-*.oci | awk '{ print $NF }')"
-          podman tag "$image_arm64" "ghcr.io/${{ github.repository }}/arm64:$version"
-          podman push "ghcr.io/${{ github.repository }}/arm64:$version"
+          podman tag "$image_arm64" "ghcr.io/${{ github.repository }}/arm64"
+          podman tag "$image_arm64" "ghcr.io/${{ github.repository }}/arm64:$dist"
       - name: test
         run: |
-          version='${{ needs.init.outputs.version }}'
-          podman run --rm "ghcr.io/${{ github.repository }}/amd64:$version" bash -c 'apt-get update && apt-get install -y vim'
-          podman run --rm "ghcr.io/${{ github.repository }}/arm64:$version" bash -c 'apt-get update && apt-get install -y vim'
+          podman run --rm "ghcr.io/${{ github.repository }}/amd64" bash -c 'apt-get update && apt-get install -y vim'
+          podman run --rm "ghcr.io/${{ github.repository }}/arm64" bash -c 'apt-get update && apt-get install -y vim'
+      - name: publish
+        run: |
+          dist='${{ needs.publish.outputs.dist }}'
+          podman login -u token -p ${{ github.token }} ghcr.io
+          podman push "ghcr.io/${{ github.repository }}/amd64"
+          podman push "ghcr.io/${{ github.repository }}/amd64:$dist"
+          podman push "ghcr.io/${{ github.repository }}/arm64"
+          podman push "ghcr.io/${{ github.repository }}/arm64:$dist"
   re-run:
     needs: [ mirror, publish ]
     if: failure() && fromJSON(github.run_attempt) < 3

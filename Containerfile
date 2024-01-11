@@ -7,4 +7,4 @@ COPY init /
 COPY mirror_apt_repo parse_pkgs /usr/local/bin/
 RUN gpg --no-default-keyring --keyring /usr/share/keyrings/debian-archive-keyring.gpg --export > /keyring.gpg
 ENTRYPOINT [ "/init", "mirror_apt_repo" ]
-CMD [ "-o", "mirror", "-t", "/repo" ]
+CMD [ "-t", "/repo" ]
