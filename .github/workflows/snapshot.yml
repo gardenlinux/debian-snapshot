@@ -52,14 +52,6 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
       - if: ${{ steps.skip.outputs.skip != 'true' }}
-        name: pack repo
-        run: tar -c repo | gzip > repo.tar.gz
-      - if: ${{ steps.skip.outputs.skip != 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: repo
-          path: repo.tar.gz
-      - if: ${{ steps.skip.outputs.skip != 'true' }}
         name: setup mirror matrix
         id: setup_matrix
         run: |
@@ -74,7 +66,16 @@ jobs:
           if [ "$num_jobs" -gt "$MAX_MIRROR_JOBS" ]; then num_jobs="$MAX_MIRROR_JOBS"; fi
           echo "matrix=$(jq -n -c '{"id":[ range('"$num_jobs"') ]}')" >> "$GITHUB_OUTPUT"
       - if: ${{ steps.skip.outputs.skip != 'true' }}
-        run: gzip < mirrorlist > mirrorlist.gz
+        name: pack repo
+        run: |
+          rm repo/mirrorlist
+          tar -c repo | gzip > repo.tar.gz
+          gzip < mirrorlist > mirrorlist.gz
+      - if: ${{ steps.skip.outputs.skip != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo
+          path: repo.tar.gz
       - if: ${{ steps.skip.outputs.skip != 'true' }}
         uses: actions/upload-artifact@v4
         with:
@@ -166,28 +167,31 @@ jobs:
           echo "$dist" > bootstrap_container/version
           echo 'https://${{ vars.S3_BUCKET }}.s3.eu-central-1.amazonaws.com' > bootstrap_container/repo
           cd bootstrap_container
-          ./build container-amd64 container-arm64
+          ./build --jobs="$(nproc)" --output-sync=target container-amd64 container-arm64
       - name: load
         run: |
           dist='${{ needs.publish.outputs.dist }}'
           image_amd64="$(podman load < bootstrap_container/.build/container-amd64-*.oci | awk '{ print $NF }')"
-          podman tag "$image_amd64" "ghcr.io/${{ github.repository }}/amd64"
-          podman tag "$image_amd64" "ghcr.io/${{ github.repository }}/amd64:$dist"
+          podman tag "$image_amd64" "ghcr.io/${{ github.repository }}:$dist-amd64"
           image_arm64="$(podman load < bootstrap_container/.build/container-arm64-*.oci | awk '{ print $NF }')"
-          podman tag "$image_arm64" "ghcr.io/${{ github.repository }}/arm64"
-          podman tag "$image_arm64" "ghcr.io/${{ github.repository }}/arm64:$dist"
+          podman tag "$image_arm64" "ghcr.io/${{ github.repository }}:$dist-arm64"
       - name: test
         run: |
-          podman run --rm "ghcr.io/${{ github.repository }}/amd64" bash -c 'apt-get update && apt-get install -y vim'
-          podman run --rm "ghcr.io/${{ github.repository }}/arm64" bash -c 'apt-get update && apt-get install -y vim'
+          dist='${{ needs.publish.outputs.dist }}'
+          podman run --rm "ghcr.io/${{ github.repository }}:$dist-amd64" bash -c 'apt-get update && apt-get install -y vim'
+          podman run --rm "ghcr.io/${{ github.repository }}:$dist-arm64" bash -c 'apt-get update && apt-get install -y vim'
       - name: publish
         run: |
           dist='${{ needs.publish.outputs.dist }}'
           podman login -u token -p ${{ github.token }} ghcr.io
-          podman push "ghcr.io/${{ github.repository }}/amd64"
-          podman push "ghcr.io/${{ github.repository }}/amd64:$dist"
-          podman push "ghcr.io/${{ github.repository }}/arm64"
-          podman push "ghcr.io/${{ github.repository }}/arm64:$dist"
+          podman push "ghcr.io/${{ github.repository }}:$dist-amd64"
+          podman push "ghcr.io/${{ github.repository }}:$dist-arm64"
+          podman manifest create "ghcr.io/${{ github.repository }}:$dist"
+          podman manifest add "ghcr.io/${{ github.repository }}:$dist" "ghcr.io/${{ github.repository }}:$dist-amd64"
+          podman manifest add "ghcr.io/${{ github.repository }}:$dist" "ghcr.io/${{ github.repository }}:$dist-arm64"
+          podman tag "ghcr.io/${{ github.repository }}:$dist" "ghcr.io/${{ github.repository }}"
+          podman push "ghcr.io/${{ github.repository }}:$dist"
+          podman push "ghcr.io/${{ github.repository }}"
   re-run:
     needs: [ mirror, publish ]
     if: failure() && fromJSON(github.run_attempt) < 3
