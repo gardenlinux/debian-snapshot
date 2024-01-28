@@ -6,9 +6,7 @@ BEGIN {
 
 NF == 0 {
 	if (pkg["Section"] != "games") {
-		if (!("Source" in pkg)) { pkg["Source"] = pkg["Package"] }
-		split(pkg["Source"], source, " ")
-		directory = "pool/" source[1] "/" pkg["Version"]
+		directory = "pool/" pkg["SHA256"]
 		if ("is_src" in pkg) {
 			lines = lines "Directory" FS directory RS
 			pkg_id = pkg["Package"] " " pkg["Version"] " " "src"
@@ -47,6 +45,9 @@ $1 ~ /Checksums-Sha256/ {
 
 checksums_flag && /^ / {
 	split($0, checksum_file, " ")
+	if (checksum_file[3] ~ /\.dsc$/) {
+		pkg["SHA256"] = checksum_file[1]
+	}
 	files = ((files != "") ? files " " : "") checksum_file[1] ":" checksum_file[3]
 }
 

@@ -1,7 +1,5 @@
 name: snapshot
 on:
-  push:
-    branch: main
   workflow_dispatch:
   schedule:
     - cron: '0 * * * *'
@@ -33,7 +31,6 @@ jobs:
           disown
       - name: mirror debian testing meta data
         run: |
-          set -x
           podman build -t mirror_apt_repo .
           mkdir repo
           podman run --rm -e 'AWS_*' \
@@ -41,13 +38,13 @@ jobs:
             -e 'KMS_KEY_CERT=${{ secrets.KMS_KEY_CERT }}' \
             -e 'KMS_KEY_GPG=${{ secrets.KMS_KEY_GPG }}' \
             -v "$PWD/repo:/repo" \
-            mirror_apt_repo
+            mirror_apt_repo -t /repo -i 'https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'
       - id: skip
         name: check if version already mirrored
         run: |
           set -eufo pipefail
           dist="$(awk -F ': ' '$1 == "Codename" { print $2 }' < repo/InRelease)"
-          if aws s3api head-object --bucket '${{ vars.S3_BUCKET }}' --key "dists/$dist/InRelease" > /dev/null 2>&1; then
+          if aws s3api head-object --bucket '${{ vars.S3_BUCKET }}' --key "debian-snapshot/dists/$dist/InRelease" > /dev/null 2>&1; then
             echo "dist $dist already exists" >&2
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
@@ -116,8 +113,6 @@ jobs:
             echo "$tmp $target"
           done | while read -r tmp target; do
             [ -n "$target" ]
-            target_transformed="$(tr '+' ' ' <<< "$target")"
-            [ "$target" = "$target_transformed" ] || aws s3 cp --quiet "$tmp" "s3://${{ vars.S3_BUCKET }}/$target_transformed"
             aws s3 cp --quiet "$tmp" "s3://${{ vars.S3_BUCKET }}/$target"
             rm "$tmp"
             cntr="$(( cntr + 1 ))"
@@ -147,11 +142,11 @@ jobs:
           gzip -d < repo.tar.gz | tar -x
           dist="$(awk -F ': ' '$1 == "Codename" { print $2 }' < repo/InRelease)"
           echo "dist=$dist" >> "$GITHUB_OUTPUT"
-          if aws s3api head-object --bucket '${{ vars.S3_BUCKET }}' --key "dists/$dist/InRelease" > /dev/null 2>&1; then
+          if aws s3api head-object --bucket '${{ vars.S3_BUCKET }}' --key "debian-snapshot/dists/$dist/InRelease" > /dev/null 2>&1; then
             echo "dist $dist already exists" >&2
             exit 1
           fi
-          aws s3 cp --recursive repo "s3://${{ vars.S3_BUCKET }}/dists/$dist"
+          aws s3 cp --recursive repo "s3://${{ vars.S3_BUCKET }}/debian-snapshot/dists/$dist"
   containerize:
     name: bootstrap dev container
     needs: publish
@@ -165,7 +160,7 @@ jobs:
         run: |
           dist='${{ needs.publish.outputs.dist }}'
           echo "$dist" > bootstrap_container/version
-          echo 'https://${{ vars.S3_BUCKET }}.s3.eu-central-1.amazonaws.com' > bootstrap_container/repo
+          echo 'https://${{ vars.CLOUDFRONT_URL }}/debian-snapshot' > bootstrap_container/repo
           cd bootstrap_container
           ./build --jobs="$(nproc)" --output-sync=target container-amd64 container-arm64
       - name: load
